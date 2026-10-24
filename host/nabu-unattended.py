@@ -154,6 +154,12 @@ def summarize(text, limit):
 
 
 def main():
+    # The captured log carries ANSI/UTF-8 fragments; a GBK console would abort the
+    # summary with UnicodeEncodeError after the window was already read.
+    try:
+        sys.stdout.reconfigure(errors='replace')
+    except AttributeError:
+        pass
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument('--kernel', help='kernel image to boot')
     parser.add_argument('--cust', help='payload to flash to cust first (never anything else)')

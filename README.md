@@ -10,8 +10,8 @@
 |---|---|
 | panic 后自动复位 | 已实测（多次自动回到 TWRP，无按键） |
 | panic 后自动进 TWRP | 已实测（misc 预置 `boot-recovery`） |
-| 主机自动读回日志 | 已实测（读回 57,286 字节启动日志并解码） |
-| panic 时刻的完整日志 | 已实现（DRAM 暂存），**待实测** |
+| 主机自动读回日志 | 已实测（读回 57,340 字节启动日志并解码） |
+| panic 时刻的完整日志 | **放弃 DRAM 方案**（实测跨复位内容损坏），改为周期写盘，最多丢 2 秒 |
 
 ## 为什么不能直接在 panic 里写 UFS
 
@@ -21,8 +21,11 @@
 所以拆成三条互不阻塞的路径：
 
 1. **正常运行期**：UFS 驱动的内核线程每 2 秒把 4 MiB 控制台 ring 写到 userdata 尾部 32 MiB。
-2. **panic 时**：只把 ring 复制到内核不使用的 DRAM（`0x130000000`，高于 `maxmem=4864 MiB`），然后 `smc #0` 发 PSCI `SYSTEM_RESET`（`x0=0x84000009`）。不碰 UFS、不分配内存。
-3. **panic 后的下一次启动**：UFS 驱动 probe 时发现 DRAM 的 `NABUSAV1` 魔数，把那份 ring 写进 UFS 窗口并锁住窗口（本轮不再被周期写覆盖）；同时往 misc 分区写 `boot-recovery`。
+2. **panic 时**：只发 `smc #0` PSCI `SYSTEM_RESET`（`x0=0x84000009`），不碰 UFS、不分配内存。
+   曾尝试把 ring 复制到 `0x130000000`（高于 `maxmem`）再复位，实测**不可用**：块确实跨复位存活，
+   但内容部分损坏（`Kext` 变成 `Ke2Nel`，header 的 dropped 变成 `0x04000000`），恢复只会把好日志覆盖成垃圾。
+   代码保留在 `nabu-panic-restart=2` 下作为实验，默认不再启用。
+3. **panic 前后**：运行期每 2 秒写窗口，所以盘上最多丢 2 秒；复位后由 misc 引导进 TWRP。
 
 主机侧等 TWRP 的 adb，`dd` 出窗口、`adb pull`、解 `NABULOG1`。
 
@@ -112,7 +115,8 @@ python host/nabu-unattended.py --no-boot
 
 ## 已知限制
 
-- panic 日志滞后一次启动：本次 panic 存 DRAM，下一次启动 probe 才写盘；TWRP 里读到的是已写盘的那份。窗口写完后锁住，避免本轮启动覆盖。
+- **DRAM 暂存不可用**：PSCI `SYSTEM_RESET` 后该块只有部分内容保留，实测出现位翻转；日志以每 2 秒的 UFS 副本为准。
+- 因此 panic 那一刻的最后 ≤2 秒输出可能丢失，包括 panic 字符串本身；panic 屏上的标记仍需拍照补充。
 - 复位后能否进 TWRP 取决于 misc 里的 `boot-recovery`；它由内核在每次启动时写入，TWRP 启动后可能清除。
 - TWRP 的 adb 状态是 `recovery`（不是 `device`）。
 - TWRP 启动约 60–120 秒，主机轮询间隔 10 秒。
