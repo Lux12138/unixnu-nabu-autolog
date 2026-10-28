@@ -4,6 +4,19 @@
 
 设备：小米平板 5（nabu / SM8150-AC，12 GiB DRAM），引导链 XBL → ABL → `fastboot boot` Mu UEFI → UniXNU cust payload → XNU。
 
+> **定位（2026-10-28 更新）：本仓库是 panic 场景的旁路方案，不是主线的日志通路。**
+>
+> 主线的实时日志与控制走 **DWC3 CDC 串口 + 无人值守流水线**：见
+> [`nabu-usb-cdc`](https://github.com/Lux12138/nabu-usb-cdc)（`docs/07`），
+> 以及 [`unixnu-nabu/CURRENT-STATE.md`](https://github.com/Lux12138/unixnu-nabu/blob/main/CURRENT-STATE.md)。
+>
+> - **仍然有效**：UFS 窗口与 `NABULOG1` 格式、2 秒周期写盘、`nabu-panic-restart` 开关
+>   （内核 `nabu-autolog=1` 仍会启用）、misc 预置 `boot-recovery`。
+> - **已被取代**：把“读回启动日志”当作主要手段。正常轮次现在直接走 CDC，主机侧不需要
+>   `dd` 窗口；复位改由 APSS 硬件狗负责（`nabu-park-after` 定时武装，武装后约 32 s 咬合），
+>   不再依赖 panic 路径里的 PSCI `SYSTEM_RESET`（后者只在 panic 当口使用）。
+
+
 ## 现状
 
 | 能力 | 状态 |
