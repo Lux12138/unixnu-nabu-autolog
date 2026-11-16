@@ -84,6 +84,33 @@ def pick_serial(requested):
     raise SystemExit('no board on adb or fastboot')
 
 
+def alarm():
+    """Audible on the host. A hung kernel cannot reset itself and USB is gone, so the
+    only way out is a physical power press."""
+    try:
+        import winsound
+        for _ in range(4):
+            winsound.Beep(1400, 350)
+            time.sleep(0.2)
+    except Exception:
+        sys.stdout.write('\a')
+        sys.stdout.flush()
+
+
+def wait_fastboot(timeout, ring_every=60):
+    start = time.time()
+    last_ring = start
+    while time.time() - start < timeout:
+        if fastboot_devices():
+            return True
+        if time.time() - last_ring >= ring_every:
+            print('== still waiting for fastboot: press power')
+            alarm()
+            last_ring = time.time()
+        time.sleep(10)
+    return False
+
+
 def wait_leave(serial, timeout):
     start = time.time()
     while time.time() - start < timeout:
@@ -165,7 +192,7 @@ def main():
     parser.add_argument('--cust', help='payload to flash to cust first (never anything else)')
     parser.add_argument('--twrp', help='TWRP image to boot when the reset leaves the board in fastboot')
     parser.add_argument('--serial', help='board serial; default is the only device present')
-    parser.add_argument('--timeout', type=int, default=300, help='seconds to wait for the reset')
+    parser.add_argument('--timeout', type=int, default=100, help='seconds to wait for the reset')
     parser.add_argument('--raw-out', default='nabu-log-window.bin', help='where to keep the raw window')
     parser.add_argument('--text-out', default='nabu-log.txt', help='where to keep the decoded text')
     parser.add_argument('--log-offset', type=int,
@@ -178,12 +205,8 @@ def main():
 
     if args.wait_fastboot:
         print('== waiting up to %d s for fastboot' % args.wait_fastboot)
-        start = time.time()
-        while time.time() - start < args.wait_fastboot:
-            if fastboot_devices():
-                break
-            time.sleep(10)
-        else:
+        if not wait_fastboot(args.wait_fastboot):
+            alarm()
             raise SystemExit('board never appeared on fastboot')
 
     serial = pick_serial(args.serial)
@@ -191,23 +214,35 @@ def main():
     if not args.no_boot:
         if not args.kernel:
             raise SystemExit('--kernel is required unless --no-boot')
-        if args.cust:
-            print('== flash cust %s' % args.cust)
-            result = run([FASTBOOT, '-s', serial, 'flash', 'cust', args.cust], timeout=300)
+        # One shot only: a retry loop kept re-flashing the board whenever it was
+        # slow to come back, which looked like the script flashing on its own.
+        for attempt in range(1):
+            if args.cust:
+                print('== flash cust %s' % args.cust)
+                result = run([FASTBOOT, '-s', serial, 'flash', 'cust', args.cust], timeout=300)
+                if result is None or result.returncode != 0:
+                    raise SystemExit('cust flash failed: %s'
+                                     % (result.stderr.decode('utf-8', 'replace') if result else 'timeout'))
+            print('== boot %s' % args.kernel)
+            result = run([FASTBOOT, '-s', serial, 'boot', args.kernel], timeout=180)
             if result is None or result.returncode != 0:
-                raise SystemExit('cust flash failed: %s'
+                raise SystemExit('fastboot boot failed: %s'
                                  % (result.stderr.decode('utf-8', 'replace') if result else 'timeout'))
-        print('== boot %s' % args.kernel)
-        result = run([FASTBOOT, '-s', serial, 'boot', args.kernel], timeout=180)
-        if result is None or result.returncode != 0:
-            raise SystemExit('fastboot boot failed: %s'
-                             % (result.stderr.decode('utf-8', 'replace') if result else 'timeout'))
-        if not wait_leave(serial, 30):
-            raise SystemExit('board never left fastboot; the kernel image did not start')
-        print('== booted, waiting up to %d s for the panic reset' % args.timeout)
-        kind, serial = wait_return(serial, args.timeout)
-        if kind is None:
-            raise SystemExit('board did not come back; did the panic path reach PSCI reset?')
+            if not wait_leave(serial, 30):
+                alarm()
+                raise SystemExit('board never left fastboot; the kernel image did not start')
+            print('== booted, waiting up to %d s for the panic reset' % args.timeout)
+            kind, serial = wait_return(serial, args.timeout)
+            if kind is not None:
+                break
+            # A hung kernel cannot reset itself and the USB device is gone.
+            print('== board did not come back: kernel hang. Ringing for a power press.')
+            alarm()
+            if not wait_fastboot(100):
+                raise SystemExit('no fastboot after 100 s; stopping')
+            serial = pick_serial(args.serial)
+        else:
+            raise SystemExit('board did not come back; stopping (no retry)')
         print('== board is back on %s as %s' % (kind, serial))
 
         if kind == 'fastboot':
